@@ -17,7 +17,8 @@ export const chatHandler = async (
             input: query,
             client_id,
             lat,
-            long
+            long,
+            live
         });
 
         logger.info(`Total request time: ${(performance.now() - start).toFixed(0)}ms`);
