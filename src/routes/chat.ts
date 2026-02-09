@@ -9,7 +9,7 @@ export const chatRoutes = async (app: FastifyInstance) => {
     app.setValidatorCompiler(validatorCompiler);
     app.setSerializerCompiler(serializerCompiler);
 
-    app.withTypeProvider<ZodTypeProvider>().post('/', {
+    app.withTypeProvider<ZodTypeProvider>().post('/chat', {
         schema: chatSchema
     }, chatHandler);
 };

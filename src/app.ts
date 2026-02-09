@@ -1,4 +1,5 @@
 import fastify, { FastifyInstance } from 'fastify';
+import cors from '@fastify/cors';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { env } from './config/env';
@@ -10,6 +11,13 @@ export const buildApp = async (): Promise<FastifyInstance> => {
         logger: {
             transport: loggerOptions.transport
         },
+    });
+
+    
+    await app.register(cors, {
+        origin: true, // Allow all origins (for development)
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        credentials: true
     });
 
     await app.register(swagger, {
@@ -52,7 +60,7 @@ export const buildApp = async (): Promise<FastifyInstance> => {
     });
 
     // API Routes
-    await app.register(chatRoutes, { prefix: '/api/v1/chat' });
+    await app.register(chatRoutes, { prefix: '/api' });
 
     return app;
 };

@@ -19,6 +19,7 @@ class IntentClassifier {
             "atm": ["cash withdrawal", "atm machine", "bank branch", "money transfer", "paisa kadhaycha aahe"],
             "garage": ["car repair", "bike puncture", "mechanic shop", "air filling station", "gadi kharab zali", "repair"],
             "shop": ["grocery store", "shopping mall", "buy clothes", "market", "dukan", "general store", "shopping"],
+            "knowledge": ["who is the MLA", "sangamner tahashildar contact", "election results", "college fees", "gram panchayat information", "political party details", "government schemes", "local news sangamner", "neta information", "adhikari number"],
             "general_chat": ["just casual talking", "greeting the assistant", "asking about identity", "how are you doing", "thanking someone", "hi", "hello", "good morning"]
         };
 

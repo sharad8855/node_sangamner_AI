@@ -4,9 +4,6 @@ import { logger } from './utils/logger';
 
 const start = async () => {
     try {
-        // Initialize services
-        // Qdrant initialization removed as per request
-
         const app = await buildApp();
 
         await app.listen({ port: env.PORT, host: '0.0.0.0' });

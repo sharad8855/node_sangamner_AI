@@ -1,149 +1,142 @@
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { createAgent } from "langchain";
-import NodeCache from 'node-cache';  // npm i node-cache
+import { HumanMessage, AIMessage, SystemMessage } from "@langchain/core/messages";
 import { getTools } from "../tools";
 import { logger } from "../utils/logger";
-import { intentClassifier } from "./intent";
+import { generateActions, detectBusinessSelection } from "../utils/actionGenerator";
 
-const searchCache = new NodeCache({ stdTTL: 600 });
 const chatModel = new ChatGoogleGenerativeAI({
-    model: "gemini-2.0-flash",  // ✅ Your working model
+    model: "gemini-2.0-flash",
     temperature: 0,
-    maxRetries: 1, // 15s max
+    maxRetries: 1,
     apiKey: process.env.GEMINI_API_KEY,
 });
 
+function buildMessageHistory(history: any[]): (HumanMessage | AIMessage)[] {
+    const messages: (HumanMessage | AIMessage)[] = [];
+    if (!history) return messages;
+    for (let i = 0; i < history.length; i++) {
+        const item = history[i];
+        if (typeof item === 'string') {
+            messages.push(new HumanMessage(item));
+            if (i + 1 < history.length && typeof history[i + 1] === 'string') {
+                messages.push(new AIMessage(history[i + 1]));
+                i++;
+            }
+        }
+    }
+    return messages;
+}
 
 interface RunAgentParams {
     input: string;
     client_id: string;
+    user_id: string;
     lat?: number;
     long?: number;
     live?: boolean;
+    previous_results?: any[];
+    history?: any[];
 }
 
-enum Intent {
-    LIVE_SEARCH = "LIVE_SEARCH",
-    NEARBY = "NEARBY",
-    KNOWLEDGE = "KNOWLEDGE",
-    CHAT = "CHAT"
-}
-
-async function runLiveSearch(input: string) {
-    const cacheKey = `search:${input.toLowerCase()}`;
-    if (searchCache.has(cacheKey)) {
-        logger.info("🎯 CACHE HIT - instant!");
-        return searchCache.get(cacheKey) as any;
-    }
-
-    logger.info("🔍 Searching...");
-    const searchTool = { google_search: {} };
-    const liveModel = chatModel.bindTools([searchTool]);
-
-    const result = await liveModel.invoke(input);
-
-    const response = {
-        response: result.content as string,
-        tool_results: null
-    };
-
-    searchCache.set(cacheKey, response);
-    logger.info("✅ Cached");
-    return response;
-}
-
-export async function runAgent({ input, client_id, lat, long, live }: RunAgentParams) {
+export async function runAgent({ input, client_id, user_id, lat, long, live, previous_results, history }: RunAgentParams) {
     const start = performance.now();
+    
+    // 1. Context madhun business selection check karne
+    const selectedBusinessId = detectBusinessSelection(input, previous_results);
 
-    // 1. INTENT CLASSIFICATION
-    let intent = Intent.CHAT;
-
-    if (live) {
-        intent = Intent.LIVE_SEARCH;
-    } else {
-        // Use Semantic Classifier
-        const { intent: clsIntent, score } = await intentClassifier.getIntent(input);
-        logger.info(`Classifier output: ${clsIntent} (score: ${score.toFixed(2)})`);
-
-        // Map specific categories to NEARBY
-        const nearbyCategories = ['hospital', 'restaurant', 'school', 'petrol_pump', 'atm', 'garage', 'shop'];
-        if (nearbyCategories.includes(clsIntent)) {
-            intent = Intent.NEARBY;
-        } else if (/(history|culture|population|mayor|when was|who is|tell me about sangamner|facts)/.test(input.toLowerCase())) {
-            // Fallback for Knowledge (not in classifier map yet)
-            intent = Intent.KNOWLEDGE;
-        }
-    }
-
-    logger.info(`Final Intent: ${intent}`);
-
-    // 2. ROUTING
     try {
-        if (intent === Intent.LIVE_SEARCH) {
-            return await runLiveSearch(input);
-        }
+        const tools = getTools({ client_id, lat, long });
+        const modelWithTools = chatModel.bindTools(tools);
 
-        if (intent === Intent.NEARBY) {
-            logger.info("Directly invoking Nearby Tool...");
-            const tools = getTools({ client_id, lat, long });
-            const nearbyTool = tools.find(t => t.name === "nearby_service_tool");
+        // ✅ Updated System Prompt with get_business_actions logic
+        const systemPromptStr = `You are Sangamner AI, a friendly local assistant.
+User location: ${lat}, ${long}
+Client: ${client_id}
 
-            if (nearbyTool) {
-                const toolResultStr = await nearbyTool.call({ query: input });
+1. Reply ONLY in user's last language (English OR Marathi). Never mix.
 
-                const formattingPrompt = `User asked: "${input}". 
-                Here are the search results: ${toolResultStr}
-                
-                Please answer the user's question concisely using these results. Do not mention "ID" or internal data. Just list the places nicely.`;
+TOOLS:
+- nearby_service_tool: Search for places (gyms, hospitals, schools).
+- sangamner_knowledge_tool: Local facts about Sangamner (MLA, history, fees).
+- live_search_tool: General internet queries (only if live mode is on).
 
-                const response = await chatModel.invoke(formattingPrompt);
-                let toolResults = null;
-                try { toolResults = JSON.parse(toolResultStr); } catch { }
+BEHAVIOR:
+1. If the user says "yes", "proceed", "book", or "I choose [Name]", you MUST identify the business ID.
+2. When a specific business is selected or confirmed, mention that "Action buttons" (like Book Appointment, Get Directions) are available below.
+3. For "which is best", compare 'rating' in the data. Mention the rating.
+4. Short. Friendly. Human. Professional.`;
 
-                return {
-                    response: response.content as string,
-                    tool_results: toolResults
-                };
+        const messageHistory = buildMessageHistory(history || []);
+        const messages = [
+            new SystemMessage(systemPromptStr),
+            ...messageHistory,
+            new HumanMessage(input)
+        ];
+
+        const response = await modelWithTools.invoke(messages);
+        let finalAiText = response.content as string;
+        let tool_results = null;
+
+        // 2. Tool Calling Logic
+        if (response.tool_calls && response.tool_calls.length > 0) {
+            const toolCall = response.tool_calls[0];
+            const selectedTool = tools.find(t => t.name === toolCall.name);
+
+            if (selectedTool) {
+                logger.info(`Gemini calling: ${toolCall.name}`);
+                const toolOutput = await selectedTool.call(toolCall.args as any);
+                const toolOutputString = typeof toolOutput === 'string' ? toolOutput : JSON.stringify(toolOutput);
+
+                try {
+                    tool_results = JSON.parse(toolOutputString);
+                } catch {
+                    tool_results = toolOutputString;
+                }
+
+                const finalResponse = await chatModel.invoke([
+                    ...messages,
+                    new AIMessage(response),
+                    new HumanMessage(`DATA FROM TOOL: ${toolOutputString}\n\nBased on this, give a short final response. If it's a place, mention I've found some results for you.`)
+                ]);
+                finalAiText = finalResponse.content as string;
             }
         }
 
-        if (intent === Intent.KNOWLEDGE) {
-            logger.info("Directly invoking Knowledge Tool...");
-            const tools = getTools({ client_id, lat, long });
-            const knowledgeTool = tools.find(t => t.name === "sangamner_knowledge_tool");
+        // ✅ 3. Get Business Actions (The missing piece)
+        // Jar user ne konta business select kela asel tar buttons generate kara
+        let actions: any[] = [];
+        
+        // Keywords check kara: proceed, book, select, kiva yes
+        const userWantsToProceed = /(proceed|yes|book|choose|select|go with|take me there)/i.test(input);
 
-            if (knowledgeTool) {
-                const toolResultStr = await knowledgeTool.call({ query: input });
+        const finalBusinessId = selectedBusinessId || (tool_results && Array.isArray(tool_results) && userWantsToProceed ? tool_results[0].id : undefined);
 
-                const formattingPrompt = `User asked: "${input}".
-                 Knowledge Base returned: ${toolResultStr}
-                 
-                 Synthesize an answer for the user based *only* on this information.`;
-
-                const response = await chatModel.invoke(formattingPrompt);
-
-                return {
-                    response: response.content as string,
-                    tool_results: toolResultStr
-                };
+        // STRICTION: Buttons fakt user ne confirmation dilya nantarch dakhva
+        if (finalBusinessId && userWantsToProceed) {
+            logger.info(`Generating actions for business_id: ${finalBusinessId}`);
+            actions = generateActions({ 
+                business_id: finalBusinessId, 
+                user_id, 
+                client_id 
+            });
+            
+            if (!finalAiText.toLowerCase().includes("buttons") && !finalAiText.toLowerCase().includes("below")) {
+                finalAiText += " You can use the buttons below to proceed.";
             }
         }
 
-        // Fallback or CHAT intent
-        logger.info("Handling as General Chat...");
-        const response = await chatModel.invoke(input);
-
-        logger.info(`Total time: ${(performance.now() - start).toFixed(0)}ms`);
         return {
-            response: response.content as string,
-            tool_results: null
+            ai_response: finalAiText,
+            result: tool_results,
+            actions: actions
         };
 
     } catch (error: any) {
-        logger.error(error, "Error during intent handling");
-        return {
-            response: "I encountered an error processing your request.",
-            tool_results: { error: error.message }
+        logger.error(error, "Agent Error");
+        return { 
+            ai_response: "Mala maf kara, kahi tri तांत्रिक adchan aali ahe.", 
+            result: null, 
+            actions: [] 
         };
     }
 }
